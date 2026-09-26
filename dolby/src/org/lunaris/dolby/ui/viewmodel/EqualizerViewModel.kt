@@ -13,6 +13,7 @@ import androidx.lifecycle.viewModelScope
 import org.lunaris.dolby.DolbyConstants
 import org.lunaris.dolby.R
 import org.lunaris.dolby.data.DolbyRepository
+import org.lunaris.dolby.audio.DapEqualizerMath
 import org.lunaris.dolby.data.autoeq.*
 import org.lunaris.dolby.domain.models.*
 import org.lunaris.dolby.utils.ToastHelper
@@ -142,6 +143,16 @@ class EqualizerViewModel(application: Application) : AndroidViewModel(applicatio
                 prefs.edit().putString("last_applied_id", entry.id).commit()
                 _currentAppliedAutoEqId.value = entry.id
                 
+                // The backend stores canonical AutoEq GraphicEQ results. AutoEq's
+                // GraphicEQ export already contains its headroom normalization, so
+                // optional preamp metadata is not applied a second time here.
+                if (profile.preamp != null) {
+                    DolbyConstants.dlog(
+                        TAG,
+                        "AutoEQ preamp metadata present (" + profile.preamp + " dB); " +
+                            "using canonical GraphicEQ curve to avoid double attenuation"
+                    )
+                }
                 applyAutoEqProfile(profile.name, profile.graphicEq)
             } else {
                 ToastHelper.showToast(ctx, "Failed to download profile for ${entry.name}")
@@ -157,123 +168,104 @@ class EqualizerViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             try {
                 val parsedAutoEq = parseAutoEqString(autoEqString)
-                if (parsedAutoEq.isEmpty()) {
-                    DolbyConstants.dlog(TAG, "Failed to parse AutoEQ string")
+                if (parsedAutoEq.size < 2) {
+                    DolbyConstants.dlog(TAG, "Failed to parse AutoEQ GraphicEQ curve")
                     return@launch
                 }
 
-                val targetFreqs = when (currentBandMode) {
-                    BandMode.TEN_BAND -> DolbyRepository.BAND_FREQUENCIES_10
-                    BandMode.FIFTEEN_BAND -> DolbyRepository.BAND_FREQUENCIES_15
-                    BandMode.TWENTY_BAND -> DolbyRepository.BAND_FREQUENCIES_20
-                }
-
+                // AutoEQ is a full-resolution correction curve. Always sample and
+                // write all 20 native DAP bands instead of reducing the correction
+                // to whichever editor view happened to be selected.
+                val targetFreqs = DolbyRepository.BAND_FREQUENCIES_20
                 val newBandGains = targetFreqs.map { targetHz ->
-                    val calculatedGain = interpolateGainForFrequency(targetHz, parsedAutoEq)
-                    BandGain(frequency = targetHz, gain = calculatedGain.coerceIn(-150, 150))
+                    val gainDb = DapEqualizerMath.sampleLogFrequency(
+                        targetHz.toDouble(),
+                        parsedAutoEq,
+                    )
+                    BandGain(
+                        frequency = targetHz,
+                        gain = DapEqualizerMath.dbToQ4(gainDb),
+                    )
                 }
 
                 val presetName = context.getString(R.string.dolby_autoeq_preset_name, headphoneName)
-                
+
                 if (state.presets.any { it.name.equals(presetName, ignoreCase = true) }) {
                     repository.deleteUserPreset(presetName)
                 }
-                
-                repository.addUserPreset(presetName, newBandGains, currentBandMode)
-                repository.setEqualizerGains(currentProfile, newBandGains, currentBandMode)
-                
-                ToastHelper.showToast(context, context.getString(R.string.dolby_autoeq_applied, headphoneName))
+
+                repository.setBandMode(BandMode.TWENTY_BAND)
+                currentBandMode = BandMode.TWENTY_BAND
+                repository.addUserPreset(presetName, newBandGains, BandMode.TWENTY_BAND)
+                repository.setEqualizerGains(currentProfile, newBandGains, BandMode.TWENTY_BAND)
+
+                ToastHelper.showToast(
+                    context,
+                    context.getString(R.string.dolby_autoeq_applied, headphoneName)
+                )
                 loadEqualizer()
             } catch (e: Exception) {
                 DolbyConstants.dlog(TAG, "Error applying AutoEQ profile: ${e.message}")
             }
         }
     }
-    
-    private fun parseAutoEqString(eqString: String): Map<Int, Int> {
-        val map = mutableMapOf<Int, Int>()
-        val cleanString = eqString.removePrefix("GraphicEQ:").trim()
-        val pairs = cleanString.split(";")
-        
-        for (pair in pairs) {
-            val parts = pair.trim().split(Regex("\\s+"))
-            if (parts.size == 2) {
-                val hz = parts[0].toIntOrNull()
-                val db = parts[1].toFloatOrNull()
-                if (hz != null && db != null) {
-                    map[hz] = (db * 10).toInt()
-                }
+
+    private fun parseAutoEqString(eqString: String): List<Pair<Double, Double>> {
+        val cleanString = eqString
+            .substringAfter("GraphicEQ:", missingDelimiterValue = "")
+            .trim()
+        if (cleanString.isEmpty()) return emptyList()
+
+        val points = cleanString.split(";").mapNotNull { pair ->
+            val parts = pair.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+            if (parts.size != 2) return@mapNotNull null
+
+            val hz = parts[0].toDoubleOrNull()
+            val db = parts[1].toDoubleOrNull()
+            if (hz == null || db == null || !hz.isFinite() || !db.isFinite() || hz <= 0.0) {
+                return@mapNotNull null
             }
+            hz to db
+        }.sortedBy { it.first }
+
+        if (points.zipWithNext().any { (first, second) -> first.first == second.first }) {
+            DolbyConstants.dlog(TAG, "AutoEQ GraphicEQ contains duplicate frequencies")
+            return emptyList()
         }
-        return map
-    }
-
-    private fun interpolateGainForFrequency(targetHz: Int, autoEqData: Map<Int, Int>): Int {
-        if (autoEqData.containsKey(targetHz)) {
-            return autoEqData[targetHz]!!
-        }
-
-        val sortedFreqs = autoEqData.keys.sorted()
-        val lowerHz = sortedFreqs.lastOrNull { it < targetHz }
-        val upperHz = sortedFreqs.firstOrNull { it > targetHz }
-
-        if (lowerHz == null) return autoEqData[upperHz] ?: 0
-        if (upperHz == null) return autoEqData[lowerHz] ?: 0
-
-        val lowerGain = autoEqData[lowerHz]!!
-        val upperGain = autoEqData[upperHz]!!
-        
-        val ratio = (targetHz - lowerHz).toFloat() / (upperHz - lowerHz)
-        return (lowerGain + ratio * (upperGain - lowerGain)).toInt()
+        return points
     }
 
     private fun getBuiltInPresets(bandMode: BandMode): List<EqualizerPreset> {
         val names = context.resources.getStringArray(R.array.dolby_preset_entries)
         val values = context.resources.getStringArray(R.array.dolby_preset_values)
-        
+        val targetFreqs = frequenciesForMode(bandMode)
+
         return names.mapIndexed { index, name ->
-            val gains = values[index].split(",").map { it.toInt() }
-            
-            val frequencies = when (bandMode) {
-                BandMode.TEN_BAND -> DolbyRepository.BAND_FREQUENCIES_10
-                BandMode.FIFTEEN_BAND -> DolbyRepository.BAND_FREQUENCIES_15
-                BandMode.TWENTY_BAND -> DolbyRepository.BAND_FREQUENCIES_20
+            val fullGains = values[index]
+                .split(",")
+                .map { it.trim().toIntOrNull() ?: 0 }
+            val targetGains = targetFreqs.map { targetHz ->
+                DapEqualizerMath.interpolateQ4(
+                    targetHz,
+                    DolbyRepository.BAND_FREQUENCIES_20,
+                    fullGains,
+                )
             }
-            
-            val tenBandGains = gains.filterIndexed { i, _ -> i % 2 == 0 }
-            
-            val targetGains = when (bandMode) {
-                BandMode.TEN_BAND -> tenBandGains
-                BandMode.FIFTEEN_BAND -> {
-                    val result = mutableListOf<Int>()
-                    result.add(tenBandGains[0])
-                    result.add(tenBandGains[0])
-                    result.add(tenBandGains[0])
-                    result.add(tenBandGains[1])
-                    result.add(tenBandGains[2])
-                    result.add(tenBandGains[3])
-                    result.add(tenBandGains[4])
-                    result.add((tenBandGains[4] + tenBandGains[5]) / 2)
-                    result.add(tenBandGains[5])
-                    result.add((tenBandGains[5] + tenBandGains[6]) / 2)
-                    result.add(tenBandGains[6])
-                    result.add((tenBandGains[6] + tenBandGains[7]) / 2)
-                    result.add(tenBandGains[7])
-                    result.add((tenBandGains[7] + tenBandGains[8]) / 2)
-                    result.add(tenBandGains[9])
-                    result
-                }
-                BandMode.TWENTY_BAND -> gains
-            }
-            
+
             EqualizerPreset(
                 name = name,
-                bandGains = frequencies.mapIndexed { i, freq ->
-                    BandGain(frequency = freq, gain = targetGains.getOrElse(i) { 0 })
+                bandGains = targetFreqs.mapIndexed { i, freq ->
+                    BandGain(frequency = freq, gain = targetGains[i])
                 },
                 bandMode = bandMode
             )
         }
+    }
+
+    private fun frequenciesForMode(mode: BandMode): List<Int> = when (mode) {
+        BandMode.TEN_BAND -> DolbyRepository.BAND_FREQUENCIES_10
+        BandMode.FIFTEEN_BAND -> DolbyRepository.BAND_FREQUENCIES_15
+        BandMode.TWENTY_BAND -> DolbyRepository.BAND_FREQUENCIES_20
     }
 
     fun setBandMode(mode: BandMode) {
@@ -305,45 +297,32 @@ class EqualizerViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun convertPresetToBandMode(preset: EqualizerPreset, targetMode: BandMode): List<BandGain> {
-        val sourceFreqs = when (preset.bandMode) {
-            BandMode.TEN_BAND -> DolbyRepository.BAND_FREQUENCIES_10
-            BandMode.FIFTEEN_BAND -> DolbyRepository.BAND_FREQUENCIES_15
-            BandMode.TWENTY_BAND -> DolbyRepository.BAND_FREQUENCIES_20
-        }
-        
-        val targetFreqs = when (targetMode) {
-            BandMode.TEN_BAND -> DolbyRepository.BAND_FREQUENCIES_10
-            BandMode.FIFTEEN_BAND -> DolbyRepository.BAND_FREQUENCIES_15
-            BandMode.TWENTY_BAND -> DolbyRepository.BAND_FREQUENCIES_20
-        }
-        
+    private fun convertPresetToBandMode(
+        preset: EqualizerPreset,
+        targetMode: BandMode,
+    ): List<BandGain> {
+        val sourceFreqs = frequenciesForMode(preset.bandMode)
+        val targetFreqs = frequenciesForMode(targetMode)
+
         if (preset.bandGains.size != sourceFreqs.size) {
-            DolbyConstants.dlog(TAG, 
-                "Preset band count mismatch: expected ${sourceFreqs.size}, got ${preset.bandGains.size}")
+            DolbyConstants.dlog(
+                TAG,
+                "Preset band count mismatch: expected ${sourceFreqs.size}, " +
+                    "got ${preset.bandGains.size}"
+            )
             return targetFreqs.map { BandGain(frequency = it, gain = 0) }
         }
 
+        val sourceGains = preset.bandGains.map { it.gain }
         return targetFreqs.map { targetFreq ->
-            val closestIdx = sourceFreqs.indexOfFirst { it >= targetFreq }
-            val gain = when {
-                closestIdx == -1 -> {
-                    preset.bandGains.lastOrNull()?.gain ?: 0
-                }
-                closestIdx == 0 -> {
-                    preset.bandGains.firstOrNull()?.gain ?: 0
-                }
-                else -> {
-                    val prevFreq = sourceFreqs[closestIdx - 1]
-                    val nextFreq = sourceFreqs[closestIdx]
-                    val prevGain = preset.bandGains.getOrNull(closestIdx - 1)?.gain ?: 0
-                    val nextGain = preset.bandGains.getOrNull(closestIdx)?.gain ?: 0
-                    
-                    val ratio = (targetFreq - prevFreq).toFloat() / (nextFreq - prevFreq)
-                    (prevGain + ratio * (nextGain - prevGain)).toInt()
-                }
-            }
-            BandGain(frequency = targetFreq, gain = gain)
+            BandGain(
+                frequency = targetFreq,
+                gain = DapEqualizerMath.interpolateQ4(
+                    targetFreq,
+                    sourceFreqs,
+                    sourceGains,
+                ),
+            )
         }
     }
 
