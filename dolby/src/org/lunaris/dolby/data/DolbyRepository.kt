@@ -230,16 +230,9 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
 
     private fun restoreProfilePreset(profile: Int) {
         try {
-            val prefs = getProfilePrefs(profile)
-            val savedPresetGains = prefs.getString(DolbyConstants.PREF_PRESET, null)
-            
-            if (savedPresetGains != null) {
-                val gains = savedPresetGains.split(",").mapNotNull { it.toIntOrNull() }.toIntArray()
-                if (gains.size == 20) {
-                    dolbyEffect.setDapParameter(DsParam.GEQ_BAND_GAINS, gains, profile)
-                    DolbyConstants.dlog(TAG, "Restored preset for profile $profile")
-                }
-            }
+            val baseGains = getBaseEqualizerQ4(profile) ?: return
+            writeComposedEqualizer(profile, baseGains)
+            DolbyConstants.dlog(TAG, "Restored base preset and derived EQ for profile $profile")
         } catch (e: Exception) {
             DolbyConstants.dlog(TAG, "Failed to restore preset for profile $profile: ${e.message}")
         }
@@ -303,84 +296,35 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
 
     fun setBassCurve(profile: Int, curve: Int) {
         if (isReleased) return
-        
+        require(curve in BASS_CURVES.indices) { "Unknown bass curve: $curve" }
+
+        val prefs = getProfilePrefs(profile)
+        if (prefs.getInt(DolbyConstants.PREF_BASS_CURVE, 0) == curve) return
+        prefs.edit().putInt(DolbyConstants.PREF_BASS_CURVE, curve).apply()
+
         try {
-            val prefs = getProfilePrefs(profile)
-            val previousCurve = prefs.getInt(DolbyConstants.PREF_BASS_CURVE, 0)
-            val level = prefs.getInt(DolbyConstants.PREF_BASS_LEVEL, 0)
-            if (previousCurve == curve) return
-
-            prefs.edit().putInt(DolbyConstants.PREF_BASS_CURVE, curve).apply()
-
-            if (level <= 0) return
-            checkEffect()
-            val currentGains = dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile)
-            val modifiedGains = currentGains.copyOf()
-            applyBassCurve(modifiedGains, level, previousCurve, -1)
-            applyBassCurve(modifiedGains, level, curve, 1)
-            dolbyEffect.setDapParameter(DsParam.GEQ_BAND_GAINS, modifiedGains, profile)
-            
-            val gainsString = modifiedGains.joinToString(",")
-            prefs.edit().putString(DolbyConstants.PREF_PRESET, gainsString).apply()
+            recomposeEqualizer(profile)
         } catch (e: Exception) {
             DolbyConstants.dlog(TAG, "Error setting bass curve: ${e.message}")
             throw e
         }
     }
 
-    private fun applyBassCurve(gains: IntArray, level: Int, curve: Int, direction: Int) {
-        val weights = BASS_CURVES.getOrElse(curve) { BASS_CURVES[0] }
-        val baseGain = level * BASS_GAIN_MULTIPLIER
-        for (i in weights.indices) {
-            if (i >= gains.size) break
-            val weightedGain = (baseGain * weights[i] * direction).toInt()
-            gains[i] = (gains[i] + weightedGain).coerceIn(-150, 150)
-        }
-    }
-
     fun setBassLevel(profile: Int, level: Int) {
         if (isReleased) return
-        
-        DolbyConstants.dlog(TAG, "setBassLevel: profile=$profile level=$level")
+        require(level in 0..100) { "Bass level must be between 0 and 100" }
 
-        if (level !in 0..100) {
-            DolbyConstants.dlog(TAG, "setBassLevel: invalid level $level")
-            throw IllegalArgumentException("Bass level must be between 0 and 100")
-        }
-        
         try {
             val prefs = getProfilePrefs(profile)
-            val previousLevel = prefs.getInt(DolbyConstants.PREF_BASS_LEVEL, 0)
-            
             prefs.edit().putInt(DolbyConstants.PREF_BASS_LEVEL, level).apply()
-            
-            setBassEnhancerEnabled(profile, level > 0)
-            
-            checkEffect()
-            val currentGains = dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile)
-            val modifiedGains = currentGains.copyOf()
-            
-            val curve = prefs.getInt(DolbyConstants.PREF_BASS_CURVE, 0)
-            if (previousLevel > 0) {
-                applyBassCurve(modifiedGains, previousLevel, curve, -1)
-            }
 
-            if (level > 0) {
-                applyBassCurve(modifiedGains, level, curve, 1)
-            }
-            dolbyEffect.setDapParameter(DsParam.GEQ_BAND_GAINS, modifiedGains, profile)
-            
-            val gainsString = modifiedGains.joinToString(",")
-            prefs.edit().putString(DolbyConstants.PREF_PRESET, gainsString).apply()
-            
-            DolbyConstants.dlog(TAG, "setBassLevel: success")
-        } catch (e: IllegalArgumentException) {
-            DolbyConstants.dlog(TAG, "setBassLevel: validation error - ${e.message}")
-            val prefs = getProfilePrefs(profile)
-            prefs.edit().putInt(DolbyConstants.PREF_BASS_LEVEL, 0).apply()
-            throw e
+            // The stock DAP bass enhancer is the feature master; the level/curve
+            // is a deterministic GEQ overlay derived from the immutable base EQ.
+            setBassEnhancerEnabled(profile, level > 0)
+            recomposeEqualizer(profile)
+            DolbyConstants.dlog(TAG, "setBassLevel: profile=$profile level=$level")
         } catch (e: Exception) {
-            DolbyConstants.dlog(TAG, "setBassLevel: unexpected error - ${e.message}")
+            DolbyConstants.dlog(TAG, "Error setting bass level: ${e.message}")
             throw e
         }
     }
@@ -401,56 +345,18 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
 
     fun setTrebleLevel(profile: Int, level: Int) {
         if (isReleased) return
-        
-        DolbyConstants.dlog(TAG, "setTrebleLevel: profile=$profile level=$level")
-
-        if (level !in 0..100) {
-            DolbyConstants.dlog(TAG, "setTrebleLevel: invalid level $level")
-            throw IllegalArgumentException("Treble level must be between 0 and 100")
-        }
+        require(level in 0..100) { "Treble level must be between 0 and 100" }
 
         try {
             val prefs = getProfilePrefs(profile)
-            val previousLevel = prefs.getInt(DolbyConstants.PREF_TREBLE_LEVEL, 0)
-
-            prefs.edit().putInt(DolbyConstants.PREF_TREBLE_LEVEL, level).apply()
-            setTrebleEnhancerEnabled(profile, level > 0)
-
-            checkEffect()
-            val currentGains = dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile)
-            val modifiedGains = currentGains.copyOf()
-
-            if (previousLevel > 0) {
-                val previousGain = (previousLevel * TREBLE_GAIN_MULTIPLIER).toInt()
-                for (i in 14..19) {
-                    if (i < modifiedGains.size) {
-                        modifiedGains[i] = (modifiedGains[i] - previousGain).coerceIn(-150, 150)
-                    }
-                }
-            }
-
-            if (level > 0) {
-                val trebleGain = (level * TREBLE_GAIN_MULTIPLIER).toInt()
-                for (i in 14..19) {
-                    if (i < modifiedGains.size) {
-                        modifiedGains[i] = (modifiedGains[i] + trebleGain).coerceIn(-150, 150)
-                    }
-                }
-            }
-
-            dolbyEffect.setDapParameter(DsParam.GEQ_BAND_GAINS, modifiedGains, profile)
-            
-            val gainsString = modifiedGains.joinToString(",")
-            prefs.edit().putString(DolbyConstants.PREF_PRESET, gainsString).apply()
-            
-            DolbyConstants.dlog(TAG, "setTrebleLevel: success")
-        } catch (e: IllegalArgumentException) {
-            DolbyConstants.dlog(TAG, "setTrebleLevel: validation error - ${e.message}")
-            val prefs = getProfilePrefs(profile)
-            prefs.edit().putInt(DolbyConstants.PREF_TREBLE_LEVEL, 0).apply()
-            throw e
+            prefs.edit()
+                .putInt(DolbyConstants.PREF_TREBLE_LEVEL, level)
+                .putBoolean(DolbyConstants.PREF_TREBLE, level > 0)
+                .apply()
+            recomposeEqualizer(profile)
+            DolbyConstants.dlog(TAG, "setTrebleLevel: profile=$profile level=$level")
         } catch (e: Exception) {
-            DolbyConstants.dlog(TAG, "setTrebleLevel: unexpected error - ${e.message}")
+            DolbyConstants.dlog(TAG, "Error setting treble level: ${e.message}")
             throw e
         }
     }
@@ -606,28 +512,23 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
 
     fun getEqualizerGains(profile: Int, bandMode: BandMode): List<BandGain> {
         return try {
-            val gains = dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile)
-            deserializeGains(gains, bandMode)
+            val base = getBaseEqualizerQ4(profile)
+                ?: dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile)
+            deserializeGains(base, bandMode)
         } catch (e: Exception) {
             DolbyConstants.dlog(TAG, "Error getting equalizer gains: ${e.message}")
-            val frequencies = when (bandMode) {
-                BandMode.TEN_BAND -> BAND_FREQUENCIES_10
-                BandMode.FIFTEEN_BAND -> BAND_FREQUENCIES_15
-                BandMode.TWENTY_BAND -> BAND_FREQUENCIES_20
-            }
-            frequencies.map { BandGain(frequency = it, gain = 0) }
+            frequenciesForMode(bandMode).map { BandGain(frequency = it, gain = 0) }
         }
     }
 
     fun setEqualizerGains(profile: Int, bandGains: List<BandGain>, bandMode: BandMode) {
         if (isReleased) return
-        
+
         try {
             checkEffect()
-            val gains = serializeGains(bandGains, bandMode)
-            dolbyEffect.setDapParameter(DsParam.GEQ_BAND_GAINS, gains, profile)
-            val gainsString = gains.joinToString(",")
-            getProfilePrefs(profile).edit().putString(DolbyConstants.PREF_PRESET, gainsString).apply()
+            val base = serializeGains(bandGains, bandMode)
+            persistBaseEqualizer(profile, base)
+            writeComposedEqualizer(profile, base)
         } catch (e: Exception) {
             DolbyConstants.dlog(TAG, "Error setting equalizer gains: ${e.message}")
         }
@@ -635,28 +536,26 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
 
     fun getPresetName(profile: Int): String {
         return try {
-            val gains = dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile)
-            
-            val tenBandGains = gains.filterIndexed { index, _ -> index % 2 == 0 }
-            val currentGainsString = tenBandGains.joinToString(",")
-            
+            val base = getBaseEqualizerQ4(profile)
+                ?: dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile)
+            val baseString = base.joinToString(",")
+
             val presetValues = context.resources.getStringArray(R.array.dolby_preset_values)
             val presetNames = context.resources.getStringArray(R.array.dolby_preset_entries)
-            
             presetValues.forEachIndexed { index, preset ->
-                val presetTenBand = convertTo10Band(preset)
-                if (gainsMatch(presetTenBand, currentGainsString)) {
+                if (gainsMatch(normalizePresetTo20Bands(preset), baseString)) {
                     return presetNames[index]
                 }
             }
-            
+
             presetsPrefs.all.forEach { (name, value) ->
-                val presetTenBand = convertTo10Band(value.toString())
-                if (gainsMatch(presetTenBand, currentGainsString)) {
+                val encoded = value as? String ?: return@forEach
+                val gainsPart = encoded.substringBefore("|")
+                if (gainsMatch(normalizePresetTo20Bands(gainsPart), baseString)) {
                     return name
                 }
             }
-            
+
             context.getString(R.string.dolby_preset_custom)
         } catch (e: Exception) {
             DolbyConstants.dlog(TAG, "Error getting preset name: ${e.message}")
@@ -664,27 +563,30 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
         }
     }
 
-    private fun convertTo10Band(gainsString: String): String {
+    private fun normalizePresetTo20Bands(gainsString: String): String {
         val gains = gainsString.split(",").map { it.trim().toIntOrNull() ?: 0 }
-        
-        if (gains.size == 10) {
-            return gains.joinToString(",")
+        return when (gains.size) {
+            20 -> gains.map(DapEqualizerMath::clampBoost).joinToString(",")
+            15 -> serializeGains(
+                BAND_FREQUENCIES_15.mapIndexed { index, frequency ->
+                    BandGain(frequency, gains[index])
+                },
+                BandMode.FIFTEEN_BAND,
+            ).joinToString(",")
+            10 -> serializeGains(
+                BAND_FREQUENCIES_10.mapIndexed { index, frequency ->
+                    BandGain(frequency, gains[index])
+                },
+                BandMode.TEN_BAND,
+            ).joinToString(",")
+            else -> gainsString
         }
-        
-        if (gains.size == 20) {
-            val tenBand = gains.filterIndexed { index, _ -> index % 2 == 0 }
-            return tenBand.joinToString(",")
-        }
-        
-        return gainsString
     }
 
     private fun gainsMatch(gains1: String, gains2: String): Boolean {
         val g1 = gains1.split(",").map { it.trim().toIntOrNull() ?: 0 }
         val g2 = gains2.split(",").map { it.trim().toIntOrNull() ?: 0 }
-        
         if (g1.size != g2.size) return false
-        
         return g1.zip(g2).all { (a, b) -> kotlin.math.abs(a - b) <= 1 }
     }
 
@@ -787,6 +689,12 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
         }
     }
 
+    private fun frequenciesForMode(mode: BandMode): List<Int> = when (mode) {
+        BandMode.TEN_BAND -> BAND_FREQUENCIES_10
+        BandMode.FIFTEEN_BAND -> BAND_FREQUENCIES_15
+        BandMode.TWENTY_BAND -> BAND_FREQUENCIES_20
+    }
+
     private fun deserializeGains(gains: IntArray, bandMode: BandMode): List<BandGain> {
         val frequencies = when (bandMode) {
             BandMode.TEN_BAND -> BAND_FREQUENCIES_10
@@ -844,60 +752,157 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
 
     fun setMidLevel(profile: Int, level: Int) {
         if (isReleased) return
-        
-        DolbyConstants.dlog(TAG, "setMidLevel: profile=$profile level=$level")
-
-        if (level !in 0..100) {
-            DolbyConstants.dlog(TAG, "setMidLevel: invalid level $level")
-            throw IllegalArgumentException("Mid level must be between 0 and 100")
-        }
+        require(level in 0..100) { "Mid level must be between 0 and 100" }
 
         try {
             val prefs = getProfilePrefs(profile)
-            val previousLevel = prefs.getInt(DolbyConstants.PREF_MID_LEVEL, 0)
-
-            prefs.edit().putInt(DolbyConstants.PREF_MID_LEVEL, level).apply()
-            setMidEnhancerEnabled(profile, level > 0)
-
-            checkEffect()
-            val currentGains = dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile)
-            val modifiedGains = currentGains.copyOf()
-
-            if (previousLevel > 0) {
-                val previousGain = (previousLevel * MID_GAIN_MULTIPLIER).toInt()
-                for (i in 5..13) {
-                    if (i < modifiedGains.size) {
-                        modifiedGains[i] = (modifiedGains[i] - previousGain).coerceIn(-150, 150)
-                    }
-                }
-            }
-
-            if (level > 0) {
-                val midGain = (level * MID_GAIN_MULTIPLIER).toInt()
-                for (i in 5..13) {
-                    if (i < modifiedGains.size) {
-                        modifiedGains[i] = (modifiedGains[i] + midGain).coerceIn(-150, 150)
-                    }
-                }
-            }
-
-            dolbyEffect.setDapParameter(DsParam.GEQ_BAND_GAINS, modifiedGains, profile)
-            
-            val gainsString = modifiedGains.joinToString(",")
-            prefs.edit().putString(DolbyConstants.PREF_PRESET, gainsString).apply()
-            
-            DolbyConstants.dlog(TAG, "setMidLevel: success")
-        } catch (e: IllegalArgumentException) {
-            DolbyConstants.dlog(TAG, "setMidLevel: validation error - ${e.message}")
-            val prefs = getProfilePrefs(profile)
-            prefs.edit().putInt(DolbyConstants.PREF_MID_LEVEL, 0).apply()
-            throw e
+            prefs.edit()
+                .putInt(DolbyConstants.PREF_MID_LEVEL, level)
+                .putBoolean(DolbyConstants.PREF_MID, level > 0)
+                .apply()
+            recomposeEqualizer(profile)
+            DolbyConstants.dlog(TAG, "setMidLevel: profile=$profile level=$level")
         } catch (e: Exception) {
-            DolbyConstants.dlog(TAG, "setMidLevel: unexpected error - ${e.message}")
+            DolbyConstants.dlog(TAG, "Error setting mid level: ${e.message}")
             throw e
         }
     }
-    
+
+    private fun recomposeEqualizer(profile: Int) {
+        checkEffect()
+        val base = getBaseEqualizerQ4(profile)
+            ?: dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile).also {
+                persistBaseEqualizer(profile, it)
+            }
+        writeComposedEqualizer(profile, base)
+    }
+
+    private fun writeComposedEqualizer(profile: Int, baseGains: IntArray) {
+        val effective = composeEqualizer(profile, baseGains)
+        dolbyEffect.setDapParameter(DsParam.GEQ_BAND_GAINS, effective, profile)
+    }
+
+    private fun composeEqualizer(profile: Int, baseGains: IntArray): IntArray {
+        val prefs = getProfilePrefs(profile)
+        val result = IntArray(BAND_FREQUENCIES_20.size) { index ->
+            DapEqualizerMath.clampBoost(baseGains.getOrElse(index) { 0 })
+        }
+
+        val bassLevel = prefs.getInt(DolbyConstants.PREF_BASS_LEVEL, 0).coerceIn(0, 100)
+        if (bassLevel > 0) {
+            val curve = prefs.getInt(DolbyConstants.PREF_BASS_CURVE, 0)
+                .coerceIn(BASS_CURVES.indices)
+            val weights = BASS_CURVES[curve]
+            val baseGain = bassLevel * BASS_GAIN_MULTIPLIER
+            weights.forEachIndexed { index, weight ->
+                if (index < result.size) {
+                    result[index] += (baseGain * weight).toInt()
+                }
+            }
+        }
+
+        val midLevel = prefs.getInt(DolbyConstants.PREF_MID_LEVEL, 0).coerceIn(0, 100)
+        if (midLevel > 0) {
+            val gain = (midLevel * MID_GAIN_MULTIPLIER).toInt()
+            for (index in 5..13) result[index] += gain
+        }
+
+        val trebleLevel = prefs.getInt(DolbyConstants.PREF_TREBLE_LEVEL, 0).coerceIn(0, 100)
+        if (trebleLevel > 0) {
+            val gain = (trebleLevel * TREBLE_GAIN_MULTIPLIER).toInt()
+            for (index in 14..19) result[index] += gain
+        }
+
+        for (index in result.indices) {
+            result[index] = DapEqualizerMath.clampBoost(result[index])
+        }
+        return result
+    }
+
+    private fun getBaseEqualizerQ4(profile: Int): IntArray? {
+        val prefs = getProfilePrefs(profile)
+        migrateLegacyEqualizerIfNeeded(profile, prefs)
+        val encoded = prefs.getString(DolbyConstants.PREF_EQ_BASE, null)
+            ?: prefs.getString(DolbyConstants.PREF_PRESET, null)
+            ?: return null
+        return parseTwentyBandGains(encoded)
+    }
+
+    private fun persistBaseEqualizer(profile: Int, baseGains: IntArray) {
+        val normalized = IntArray(BAND_FREQUENCIES_20.size) { index ->
+            DapEqualizerMath.clampBoost(baseGains.getOrElse(index) { 0 })
+        }
+        val encoded = normalized.joinToString(",")
+        getProfilePrefs(profile).edit()
+            .putString(DolbyConstants.PREF_EQ_BASE, encoded)
+            // Keep PREF_PRESET as a compatibility alias, but it now stores the
+            // immutable base curve instead of the composed/effective curve.
+            .putString(DolbyConstants.PREF_PRESET, encoded)
+            .putInt(DolbyConstants.PREF_EQ_COMPOSITION_VERSION, EQ_COMPOSITION_VERSION)
+            .apply()
+    }
+
+    private fun parseTwentyBandGains(encoded: String): IntArray? {
+        val values = encoded.split(",").mapNotNull { it.trim().toIntOrNull() }
+        if (values.size != BAND_FREQUENCIES_20.size) return null
+        return IntArray(values.size) { index ->
+            DapEqualizerMath.clampBoost(values[index])
+        }
+    }
+
+    /**
+     * Old builds saved the already-composed EQ in PREF_PRESET. Recover an
+     * estimated immutable base once, then all future changes are recomputed
+     * from that base. This prevents cumulative drift after clipping.
+     */
+    private fun migrateLegacyEqualizerIfNeeded(
+        profile: Int,
+        prefs: SharedPreferences,
+    ) {
+        if (prefs.getInt(DolbyConstants.PREF_EQ_COMPOSITION_VERSION, 0) >=
+            EQ_COMPOSITION_VERSION) return
+
+        val legacy = prefs.getString(DolbyConstants.PREF_PRESET, null)
+            ?.let(::parseTwentyBandGains)
+        if (legacy == null) {
+            prefs.edit()
+                .putInt(DolbyConstants.PREF_EQ_COMPOSITION_VERSION, EQ_COMPOSITION_VERSION)
+                .apply()
+            return
+        }
+
+        val estimatedBase = legacy.copyOf()
+        val bassLevel = prefs.getInt(DolbyConstants.PREF_BASS_LEVEL, 0).coerceIn(0, 100)
+        if (bassLevel > 0) {
+            val curve = prefs.getInt(DolbyConstants.PREF_BASS_CURVE, 0)
+                .coerceIn(BASS_CURVES.indices)
+            val baseGain = bassLevel * BASS_GAIN_MULTIPLIER
+            BASS_CURVES[curve].forEachIndexed { index, weight ->
+                if (index < estimatedBase.size) {
+                    estimatedBase[index] -= (baseGain * weight).toInt()
+                }
+            }
+        }
+
+        val midLevel = prefs.getInt(DolbyConstants.PREF_MID_LEVEL, 0).coerceIn(0, 100)
+        if (midLevel > 0) {
+            val gain = (midLevel * MID_GAIN_MULTIPLIER).toInt()
+            for (index in 5..13) estimatedBase[index] -= gain
+        }
+
+        val trebleLevel = prefs.getInt(DolbyConstants.PREF_TREBLE_LEVEL, 0).coerceIn(0, 100)
+        if (trebleLevel > 0) {
+            val gain = (trebleLevel * TREBLE_GAIN_MULTIPLIER).toInt()
+            for (index in 14..19) estimatedBase[index] -= gain
+        }
+
+        persistBaseEqualizer(profile, estimatedBase)
+        DolbyConstants.dlog(
+            TAG,
+            "Migrated legacy composed EQ to immutable base for profile=$profile"
+        )
+    }
+
     override fun close() {
         // Process-wide singleton: transient UI/service owners must never release
         // the global session-0 DAP controller. Process teardown releases it.
@@ -906,6 +911,7 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
     companion object {
         private const val TAG = "DolbyRepository"
         private const val EFFECT_PRIORITY = 100
+        private const val EQ_COMPOSITION_VERSION = 1
 
         @Volatile
         private var instance: DolbyRepository? = null

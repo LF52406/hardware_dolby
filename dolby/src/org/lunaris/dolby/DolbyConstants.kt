@@ -14,6 +14,8 @@ object DolbyConstants {
     const val PREF_ENABLE = "dolby_enable"
     const val PREF_PROFILE = "dolby_profile"
     const val PREF_PRESET = "dolby_preset"
+    const val PREF_EQ_BASE = "dolby_eq_base_q4"
+    const val PREF_EQ_COMPOSITION_VERSION = "dolby_eq_composition_version"
     const val PREF_IEQ = "dolby_ieq"
     const val PREF_HP_VIRTUALIZER = "dolby_virtualizer"
     const val PREF_SPK_VIRTUALIZER = "dolby_spk_virtualizer"
