@@ -298,6 +298,7 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
         if (isReleased) return
         require(curve in BASS_CURVES.indices) { "Unknown bass curve: $curve" }
 
+        ensureBaseEqualizer(profile)
         val prefs = getProfilePrefs(profile)
         if (prefs.getInt(DolbyConstants.PREF_BASS_CURVE, 0) == curve) return
         prefs.edit().putInt(DolbyConstants.PREF_BASS_CURVE, curve).apply()
@@ -315,6 +316,7 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
         require(level in 0..100) { "Bass level must be between 0 and 100" }
 
         try {
+            ensureBaseEqualizer(profile)
             val prefs = getProfilePrefs(profile)
             prefs.edit().putInt(DolbyConstants.PREF_BASS_LEVEL, level).apply()
 
@@ -348,6 +350,7 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
         require(level in 0..100) { "Treble level must be between 0 and 100" }
 
         try {
+            ensureBaseEqualizer(profile)
             val prefs = getProfilePrefs(profile)
             prefs.edit()
                 .putInt(DolbyConstants.PREF_TREBLE_LEVEL, level)
@@ -755,6 +758,7 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
         require(level in 0..100) { "Mid level must be between 0 and 100" }
 
         try {
+            ensureBaseEqualizer(profile)
             val prefs = getProfilePrefs(profile)
             prefs.edit()
                 .putInt(DolbyConstants.PREF_MID_LEVEL, level)
@@ -766,6 +770,15 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
             DolbyConstants.dlog(TAG, "Error setting mid level: ${e.message}")
             throw e
         }
+    }
+
+    private fun ensureBaseEqualizer(profile: Int): IntArray {
+        getBaseEqualizerQ4(profile)?.let { return it }
+
+        checkEffect()
+        val current = dolbyEffect.getDapParameter(DsParam.GEQ_BAND_GAINS, profile)
+        persistBaseEqualizer(profile, current)
+        return current
     }
 
     private fun recomposeEqualizer(profile: Int) {
