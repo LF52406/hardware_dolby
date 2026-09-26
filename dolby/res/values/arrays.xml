@@ -50,8 +50,9 @@
 
      <string-array name="dolby_preset_values">
         <!--
-        Enhanced preset values with improved ±15dB range for better sound quality
-        Values are now scaled to ±150 range (±15dB) for more precise audio tuning
+        Preset values use the native DAP signed-Q4 representation (16 units = 1 dB).
+        Positive GEQ boost is limited to +160 (+10 dB); existing preset payloads are
+        intentionally kept unchanged instead of being rescaled.
         -->
         <item>0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0</item>
         <item>90,54,18,-18,-54,-36,-18,-12,-6,-30,-54,-30,-6,-30,-54,-24,6,48,90,90</item>

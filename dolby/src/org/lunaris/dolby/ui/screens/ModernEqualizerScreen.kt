@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import kotlinx.coroutines.launch
 import org.lunaris.dolby.R
+import org.lunaris.dolby.audio.DapEqualizerMath
 import org.lunaris.dolby.data.autoeq.*
 import org.lunaris.dolby.ui.components.*
 import org.lunaris.dolby.ui.viewmodel.EqualizerViewModel
@@ -451,9 +452,12 @@ private fun CurveViewContent(
                     )
                 }
             }
+            val gainRange = equalizerGainRange(state.bandGains)
             Text(
-                text = if (canEdit) 
-                    "Drag the control points to adjust gain (±15 dB) • ${getFrequencyRange(state.bandMode)}"
+                text = if (canEdit)
+                    "Drag the control points to adjust gain (" +
+                        "${formatGain(gainRange.start)} to ${formatGain(gainRange.endInclusive)}) • " +
+                        getFrequencyRange(state.bandMode)
                 else
                     "Read-only view • Band mode mismatch",
                 style = MaterialTheme.typography.bodySmall,
@@ -594,6 +598,7 @@ private fun SlidersViewContent(
                         ModernEqualizerBand(
                             frequency = bandGain.frequency,
                             gain = bandGain.gain,
+                            valueRange = equalizerGainRange(state.bandGains),
                             onGainChange = { newGain ->
                                 if (canEdit) {
                                     viewModel.setBandGain(index, newGain)
@@ -624,7 +629,13 @@ private fun BandTunerCard(
     val index = selectedIndex.coerceIn(0, bandGains.lastIndex)
     val band = bandGains[index]
 
-    var sliderValue by remember(index, band.gain) { mutableFloatStateOf(band.gain / 10f) }
+    val gainRange = equalizerGainRange(bandGains)
+    val minGainQ4 = DapEqualizerMath.dbToQ4(gainRange.start.toDouble())
+    var sliderValue by remember(index, band.gain, gainRange.start) {
+        mutableFloatStateOf(
+            DapEqualizerMath.q4ToDb(band.gain).coerceIn(gainRange.start, gainRange.endInclusive)
+        )
+    }
     var lastHapticStep by remember(index) { mutableIntStateOf(band.gain) }
 
     Card(
@@ -736,7 +747,7 @@ private fun BandTunerCard(
             Slider(
                 value = sliderValue,
                 onValueChange = { newValue ->
-                    val step = (newValue * 10).toInt()
+                    val step = DapEqualizerMath.dbToQ4(newValue.toDouble())
                     if (step != lastHapticStep) {
                         scope.launch {
                             haptic.performHaptic(HapticFeedbackHelper.HapticIntensity.TEXTURE_TICK)
@@ -746,11 +757,11 @@ private fun BandTunerCard(
                     sliderValue = newValue
                 },
                 onValueChangeFinished = {
-                    onGainChange(index, (sliderValue * 10).toInt())
+                    onGainChange(index, DapEqualizerMath.dbToQ4(sliderValue.toDouble()))
                 },
                 enabled = enabled,
-                valueRange = -15f..15f,
-                steps = 299,
+                valueRange = gainRange,
+                steps = equalizerSliderSteps(gainRange),
                 modifier = Modifier.fillMaxWidth(),
                 colors = SliderDefaults.colors(
                     thumbColor = MaterialTheme.colorScheme.primary,
@@ -769,10 +780,10 @@ private fun BandTunerCard(
             ) {
                 BandAdjustButton(
                     label = stringResource(R.string.band_tuner_decrement),
-                    enabled = enabled && band.gain > -150,
+                    enabled = enabled && band.gain > minGainQ4,
                     onClick = {
-                        val newGain = (band.gain - 1).coerceAtLeast(-150)
-                        sliderValue = newGain / 10f
+                        val newGain = (band.gain - 1).coerceAtLeast(minGainQ4)
+                        sliderValue = DapEqualizerMath.q4ToDb(newGain)
                         onGainChange(index, newGain)
                     },
                     modifier = Modifier.weight(1f)
@@ -788,10 +799,10 @@ private fun BandTunerCard(
                 )
                 BandAdjustButton(
                     label = stringResource(R.string.band_tuner_increment),
-                    enabled = enabled && band.gain < 150,
+                    enabled = enabled && band.gain < DapEqualizerMath.MAX_BOOST_Q4,
                     onClick = {
-                        val newGain = (band.gain + 1).coerceAtMost(150)
-                        sliderValue = newGain / 10f
+                        val newGain = (band.gain + 1).coerceAtMost(DapEqualizerMath.MAX_BOOST_Q4)
+                        sliderValue = DapEqualizerMath.q4ToDb(newGain)
                         onGainChange(index, newGain)
                     },
                     modifier = Modifier.weight(1f)
@@ -883,14 +894,21 @@ private fun formatGain(gain: Float): String {
     return if (rounded > 0f) "+%.1f dB".format(rounded) else "%.1f dB".format(rounded + 0f)
 }
 
-@Composable
-private fun getFrequencyRange(bandMode: BandMode): String {
-    return when (bandMode) {
-        BandMode.TEN_BAND -> "32Hz - 19.7kHz"
-        BandMode.FIFTEEN_BAND -> "32Hz - 19.7kHz"
-        BandMode.TWENTY_BAND -> "32Hz - 19.7kHz"
-    }
+private fun equalizerGainRange(bandGains: List<BandGain>): ClosedFloatingPointRange<Float> {
+    val currentMinimum = bandGains.minOfOrNull { DapEqualizerMath.q4ToDb(it.gain) } ?: -10f
+    val lower = kotlin.math.floor(minOf(-10f, currentMinimum).toDouble()).toFloat()
+    return lower..DapEqualizerMath.MAX_BOOST_DB
 }
+
+private fun equalizerSliderSteps(range: ClosedFloatingPointRange<Float>): Int {
+    val intervals = kotlin.math.round(
+        (range.endInclusive - range.start) * DapEqualizerMath.Q4_PER_DB
+    ).toInt()
+    return (intervals - 1).coerceAtLeast(0)
+}
+
+@Composable
+private fun getFrequencyRange(bandMode: BandMode): String = "47Hz - 19.7kHz"
 
 @Composable
 private fun ViewModeTile(
@@ -1238,14 +1256,19 @@ fun ModernPresetSelector(
 fun ModernEqualizerBand(
     frequency: Int,
     gain: Int,
+    valueRange: ClosedFloatingPointRange<Float>,
     onGainChange: (Int) -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true
 ) {
-    var sliderValue by remember(gain) { mutableFloatStateOf(gain / 10f) }
+    var sliderValue by remember(gain, valueRange.start) {
+        mutableFloatStateOf(
+            DapEqualizerMath.q4ToDb(gain).coerceIn(valueRange.start, valueRange.endInclusive)
+        )
+    }
     val haptic = rememberHapticFeedback()
     val scope = rememberCoroutineScope()
-    var lastHapticValue by remember { mutableIntStateOf((gain / 10f).toInt()) }
+    var lastHapticValue by remember(gain) { mutableIntStateOf(gain) }
 
     Column(
         modifier = modifier
@@ -1272,7 +1295,7 @@ fun ModernEqualizerBand(
             value = sliderValue,
             onValueChange = { newValue ->
                 if (enabled) {
-                    val intValue = (newValue * 10).toInt() / 10
+                    val intValue = DapEqualizerMath.dbToQ4(newValue.toDouble())
                     if (intValue != lastHapticValue) {
                         scope.launch {
                             haptic.performHaptic(HapticFeedbackHelper.HapticIntensity.TEXTURE_TICK)
@@ -1284,11 +1307,12 @@ fun ModernEqualizerBand(
             },
             onValueChangeFinished = {
                 if (enabled) {
-                    onGainChange((sliderValue * 10).toInt())
+                    onGainChange(DapEqualizerMath.dbToQ4(sliderValue.toDouble()))
                 }
             },
             enabled = enabled,
-            valueRange = -15f..15f,
+            valueRange = valueRange,
+            steps = equalizerSliderSteps(valueRange),
             modifier = Modifier
                 .graphicsLayer {
                     rotationZ = 270f
@@ -1362,10 +1386,19 @@ private fun FrequencyResponseCurve(
         if (bandGains.isNotEmpty()) {
             val path = Path()
             val stepX = width / (bandGains.size - 1)
+            val negativeExtentQ4 = maxOf(
+                DapEqualizerMath.MAX_BOOST_Q4,
+                -(bandGains.minOfOrNull { it.gain } ?: -DapEqualizerMath.MAX_BOOST_Q4)
+            )
+            fun normalizeGain(gainQ4: Int): Float = if (gainQ4 >= 0) {
+                (gainQ4.toFloat() / DapEqualizerMath.MAX_BOOST_Q4).coerceIn(0f, 1f)
+            } else {
+                (gainQ4.toFloat() / negativeExtentQ4).coerceIn(-1f, 0f)
+            }
             
             bandGains.forEachIndexed { index, bandGain ->
                 val x = index * stepX
-                val normalizedGain = (bandGain.gain / 150f).coerceIn(-1f, 1f)
+                val normalizedGain = normalizeGain(bandGain.gain)
                 val y = centerY - (normalizedGain * centerY * 0.8f)
                 
                 if (index == 0) {
@@ -1373,7 +1406,7 @@ private fun FrequencyResponseCurve(
                 } else {
                     val prevX = (index - 1) * stepX
                     val prevGain = bandGains[index - 1].gain
-                    val prevNormalizedGain = (prevGain / 150f).coerceIn(-1f, 1f)
+                    val prevNormalizedGain = normalizeGain(prevGain)
                     val prevY = centerY - (prevNormalizedGain * centerY * 0.8f)
                     
                     val cpX1 = prevX + stepX * 0.4f

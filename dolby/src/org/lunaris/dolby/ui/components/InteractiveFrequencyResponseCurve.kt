@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.lunaris.dolby.domain.models.BandGain
+import org.lunaris.dolby.audio.DapEqualizerMath
 import kotlin.math.abs
 
 @Composable
@@ -64,6 +65,16 @@ fun InteractiveFrequencyResponseCurve(
     
     var draggedIndex by remember { mutableStateOf<Int?>(null) }
     var controlPoints by remember { mutableStateOf(bandGains.map { it.gain }) }
+
+    val negativeExtentQ4 = maxOf(
+        DapEqualizerMath.MAX_BOOST_Q4,
+        -(controlPoints.minOrNull() ?: -DapEqualizerMath.MAX_BOOST_Q4)
+    )
+    fun normalizeGain(gainQ4: Int): Float = if (gainQ4 >= 0) {
+        (gainQ4.toFloat() / DapEqualizerMath.MAX_BOOST_Q4).coerceIn(0f, 1f)
+    } else {
+        (gainQ4.toFloat() / negativeExtentQ4).coerceIn(-1f, 0f)
+    }
     
     LaunchedEffect(bandGains) {
         if (draggedIndex == null) {
@@ -95,7 +106,7 @@ fun InteractiveFrequencyResponseCurve(
                                 
                                 bandGains.forEachIndexed { index, _ ->
                                     val x = index * stepX
-                                    val normalizedGain = (controlPoints[index] / 150f).coerceIn(-1f, 1f)
+                                    val normalizedGain = normalizeGain(controlPoints[index])
                                     val y = height / 2 - (normalizedGain * height / 2 * 0.85f)
                                     
                                     val distance = kotlin.math.sqrt(
@@ -118,8 +129,13 @@ fun InteractiveFrequencyResponseCurve(
                                     val height = size.height
                                     val centerY = height / 2
                                     val y = change.position.y
-                                    val normalizedGain = ((centerY - y) / (height / 2 * 0.85f)).coerceIn(-1f, 1f)
-                                    val newGain = (normalizedGain * 150).toInt().coerceIn(-150, 150)
+                                    val normalizedGain =
+                                        ((centerY - y) / (height / 2 * 0.85f)).coerceIn(-1f, 1f)
+                                    val newGain = if (normalizedGain >= 0f) {
+                                        (normalizedGain * DapEqualizerMath.MAX_BOOST_Q4).toInt()
+                                    } else {
+                                        (normalizedGain * negativeExtentQ4).toInt()
+                                    }.coerceAtMost(DapEqualizerMath.MAX_BOOST_Q4)
                                     
                                     if (controlPoints[index] != newGain) {
                                         controlPoints = controlPoints.toMutableList().apply {
@@ -195,7 +211,7 @@ fun InteractiveFrequencyResponseCurve(
                 
                 controlPoints.forEachIndexed { index, gain ->
                     val x = index * stepX
-                    val normalizedGain = (gain / 150f).coerceIn(-1f, 1f)
+                    val normalizedGain = normalizeGain(gain)
                     val y = centerY - (normalizedGain * centerY * 0.85f)
                     
                     if (index == 0) {
@@ -203,7 +219,7 @@ fun InteractiveFrequencyResponseCurve(
                     } else {
                         val prevX = (index - 1) * stepX
                         val prevGain = controlPoints[index - 1]
-                        val prevNormalizedGain = (prevGain / 150f).coerceIn(-1f, 1f)
+                        val prevNormalizedGain = normalizeGain(prevGain)
                         val prevY = centerY - (prevNormalizedGain * centerY * 0.85f)
                         
                         val cpX1 = prevX + stepX * 0.4f
@@ -247,7 +263,7 @@ fun InteractiveFrequencyResponseCurve(
                 
                 controlPoints.forEachIndexed { index, gain ->
                     val x = index * stepX
-                    val normalizedGain = (gain / 150f).coerceIn(-1f, 1f)
+                    val normalizedGain = normalizeGain(gain)
                     val y = centerY - (normalizedGain * centerY * 0.85f)
                     
                     val isBeingDragged = draggedIndex == index
@@ -309,7 +325,7 @@ fun InteractiveFrequencyResponseCurve(
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "+15",
+                text = "+10",
                 style = MaterialTheme.typography.labelSmall,
                 color = if (isActive) {
                     secondaryColor
@@ -333,7 +349,7 @@ fun InteractiveFrequencyResponseCurve(
                 modifier = Modifier.padding(vertical = 12.dp)
             )
             Text(
-                text = "-15",
+                text = "%.1f".format(DapEqualizerMath.q4ToDb(-negativeExtentQ4)),
                 style = MaterialTheme.typography.labelSmall,
                 color = if (isActive) {
                     secondaryColor
@@ -348,7 +364,7 @@ fun InteractiveFrequencyResponseCurve(
         
         draggedIndex?.let { index ->
             val gain = controlPoints[index]
-            val gainDb = gain / 10f
+            val gainDb = DapEqualizerMath.q4ToDb(gain)
             
             Surface(
                 modifier = Modifier
