@@ -112,10 +112,10 @@ class DeviceStateManager(private val context: Context) {
         }
 
         return try {
-            val enabled = prefs.getBoolean(KEY_DOLBY_ENABLED, true)
             val profile = prefs.getInt(KEY_PROFILE, 0)
 
-            repository.setDolbyEnabled(enabled)
+            // Dolby power is global, not per-output-device. Restoring a device
+            // snapshot must not toggle the session-0 effect or fight its owner.
             repository.setCurrentProfile(profile)
 
             val storedBandCount = prefs.getInt(KEY_EQ_BAND_COUNT, -1)

@@ -13,7 +13,7 @@ import org.lunaris.dolby.data.DolbyRepository
 
 class DolbyTileService : TileService() {
 
-    private val repository by lazy { DolbyRepository(applicationContext) }
+    private val repository by lazy { DolbyRepository.getInstance(applicationContext) }
 
     override fun onStartListening() {
         super.onStartListening()

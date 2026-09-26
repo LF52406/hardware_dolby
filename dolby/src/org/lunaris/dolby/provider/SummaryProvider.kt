@@ -56,7 +56,7 @@ class SummaryProvider : ContentProvider() {
 
     private fun getDolbySummary(): String {
         val context = context ?: return ""
-        val repository = DolbyRepository(context)
+        val repository = DolbyRepository.getInstance(context)
         
         if (!repository.getDolbyEnabled()) {
             return context.getString(R.string.dolby_off)

@@ -19,7 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-class DolbyRepository(private val context: Context) : AutoCloseable {
+class DolbyRepository private constructor(private val context: Context) : AutoCloseable {
 
     private val audioManager = context.getSystemService(AudioManager::class.java)
     private var dolbyEffect = createDolbyEffect()
@@ -50,6 +50,7 @@ class DolbyRepository(private val context: Context) : AutoCloseable {
         }
     }
 
+    @Synchronized
     private fun checkEffect() {
         if (isReleased) {
             DolbyConstants.dlog(TAG, "Repository released, skipping effect check")
@@ -121,11 +122,15 @@ class DolbyRepository(private val context: Context) : AutoCloseable {
     }
 
     fun applySavedState() {
-    checkEffect()
-        val enabled = defaultPrefs.getBoolean(DolbyConstants.PREF_ENABLE, false)
-        dolbyEffect.dsOn = enabled
-        if (enabled) {
-            restoreSavedProfileIfNeeded()
+        try {
+            checkEffect()
+            val enabled = defaultPrefs.getBoolean(DolbyConstants.PREF_ENABLE, false)
+            dolbyEffect.dsOn = enabled
+            if (enabled) {
+                restoreSavedProfileIfNeeded()
+            }
+        } catch (e: Exception) {
+            DolbyConstants.dlog(TAG, "Failed to apply saved Dolby state: ${e.message}")
         }
     }
 
@@ -146,12 +151,7 @@ class DolbyRepository(private val context: Context) : AutoCloseable {
     }
 
     fun getDolbyEnabled(): Boolean {
-        return try {
-            dolbyEffect.dsOn
-        } catch (e: Exception) {
-            DolbyConstants.dlog(TAG, "Error getting Dolby enabled state: ${e.message}")
-            false
-        }
+        return defaultPrefs.getBoolean(DolbyConstants.PREF_ENABLE, false)
     }
 
     fun setDolbyEnabled(enabled: Boolean) {
@@ -167,14 +167,7 @@ class DolbyRepository(private val context: Context) : AutoCloseable {
     }
 
     fun getCurrentProfile(): Int {
-        return try {
-            checkEffect()
-            restoreSavedProfileIfNeeded()
-            dolbyEffect.profile
-        } catch (e: Exception) {
-            DolbyConstants.dlog(TAG, "Error getting current profile: ${e.message}")
-            0
-        }
+        return readSavedProfile() ?: 0
     }
 
     fun setCurrentProfile(profile: Int) {
@@ -893,25 +886,25 @@ class DolbyRepository(private val context: Context) : AutoCloseable {
         }
     }
     
-    private fun release() {
-        if (!isReleased) {
-            DolbyConstants.dlog(TAG, "Releasing repository resources")
-            isReleased = true
-            try {
-                dolbyEffect.release()
-            } catch (e: Exception) {
-                DolbyConstants.dlog(TAG, "Error releasing effect: ${e.message}")
-            }
-        }
-    }
-    
     override fun close() {
-        release()
+        // Process-wide singleton: transient UI/service owners must never release
+        // the global session-0 DAP controller. Process teardown releases it.
     }
 
     companion object {
         private const val TAG = "DolbyRepository"
         private const val EFFECT_PRIORITY = 100
+
+        @Volatile
+        private var instance: DolbyRepository? = null
+
+        fun getInstance(context: Context): DolbyRepository {
+            return instance ?: synchronized(this) {
+                instance ?: DolbyRepository(context.applicationContext).also {
+                    instance = it
+                }
+            }
+        }
         
         private const val BASS_GAIN_MULTIPLIER = 1.4f
         private const val MID_GAIN_MULTIPLIER = 1.3f

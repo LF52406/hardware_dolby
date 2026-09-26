@@ -49,7 +49,7 @@ class AppProfileMonitorService : Service() {
     override fun onCreate() {
         super.onCreate()
         appProfileManager = AppProfileManager(this)
-        dolbyRepository = DolbyRepository(this)
+        dolbyRepository = DolbyRepository.getInstance(this)
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         
         val prefs = getSharedPreferences("dolby_prefs", Context.MODE_PRIVATE)
@@ -259,7 +259,6 @@ class AppProfileMonitorService : Service() {
         super.onDestroy()
         DolbyConstants.dlog(TAG, "Service destroyed")
         stopMonitoring()
-        dolbyRepository.close()
         hasOriginalProfile = false
     }
 
