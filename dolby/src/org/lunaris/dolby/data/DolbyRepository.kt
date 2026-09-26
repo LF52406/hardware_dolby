@@ -86,41 +86,80 @@ class DolbyRepository private constructor(private val context: Context) : AutoCl
     private fun applyProfileSettings(profile: Int) {
         try {
             val prefs = getProfilePrefs(profile)
-            
-            val ieqPreset = prefs.getString(DolbyConstants.PREF_IEQ, "0")?.toIntOrNull() ?: 0
-            dolbyEffect.setDapParameter(DsParam.IEQ_PRESET, ieqPreset, profile)
-            
-            val hpVirtualizer = prefs.getBoolean(DolbyConstants.PREF_HP_VIRTUALIZER, false)
-            dolbyEffect.setDapParameter(DsParam.HEADPHONE_VIRTUALIZER, hpVirtualizer, profile)
-            
-            val spkVirtualizer = prefs.getBoolean(DolbyConstants.PREF_SPK_VIRTUALIZER, false)
-            dolbyEffect.setDapParameter(DsParam.SPEAKER_VIRTUALIZER, spkVirtualizer, profile)
-            
-            if (stereoWideningSupported) {
-                val stereoWidening = prefs.getInt(DolbyConstants.PREF_STEREO_WIDENING, 32)
-                dolbyEffect.setDapParameter(DsParam.STEREO_WIDENING_AMOUNT, stereoWidening, profile)
+
+            // The DAX profile already contains mondrian's factory tuning. Only
+            // replay parameters that the user has explicitly overridden; using
+            // synthetic defaults here would silently replace the stock profile.
+            if (prefs.contains(DolbyConstants.PREF_IEQ)) {
+                val ieqPreset = prefs.getString(DolbyConstants.PREF_IEQ, null)
+                    ?.toIntOrNull()
+                if (ieqPreset != null) {
+                    dolbyEffect.setDapParameter(DsParam.IEQ_PRESET, ieqPreset, profile)
+                }
             }
-            
-            val dialogueEnabled = prefs.getBoolean(DolbyConstants.PREF_DIALOGUE, false)
-            dolbyEffect.setDapParameter(DsParam.DIALOGUE_ENHANCER_ENABLE, dialogueEnabled, profile)
-            
-            val dialogueAmount = prefs.getInt(DolbyConstants.PREF_DIALOGUE_AMOUNT, 6)
-            dolbyEffect.setDapParameter(DsParam.DIALOGUE_ENHANCER_AMOUNT, dialogueAmount, profile)
-            
-            val bassEnabled = prefs.getBoolean(DolbyConstants.PREF_BASS, false)
-            dolbyEffect.setDapParameter(DsParam.BASS_ENHANCER_ENABLE, bassEnabled, profile)
-            
-            if (volumeLevelerSupported) {
-                val volumeLeveler = prefs.getBoolean(DolbyConstants.PREF_VOLUME, false)
-                dolbyEffect.setDapParameter(DsParam.VOLUME_LEVELER_ENABLE, volumeLeveler, profile)
+
+            if (prefs.contains(DolbyConstants.PREF_HP_VIRTUALIZER)) {
+                dolbyEffect.setDapParameter(
+                    DsParam.HEADPHONE_VIRTUALIZER,
+                    prefs.getBoolean(DolbyConstants.PREF_HP_VIRTUALIZER, false),
+                    profile
+                )
             }
-            
-            DolbyConstants.dlog(TAG, "Successfully restored all settings for profile $profile")
+
+            if (prefs.contains(DolbyConstants.PREF_SPK_VIRTUALIZER)) {
+                dolbyEffect.setDapParameter(
+                    DsParam.SPEAKER_VIRTUALIZER,
+                    prefs.getBoolean(DolbyConstants.PREF_SPK_VIRTUALIZER, false),
+                    profile
+                )
+            }
+
+            if (stereoWideningSupported &&
+                prefs.contains(DolbyConstants.PREF_STEREO_WIDENING)) {
+                dolbyEffect.setDapParameter(
+                    DsParam.STEREO_WIDENING_AMOUNT,
+                    prefs.getInt(DolbyConstants.PREF_STEREO_WIDENING, 32),
+                    profile
+                )
+            }
+
+            if (prefs.contains(DolbyConstants.PREF_DIALOGUE)) {
+                dolbyEffect.setDapParameter(
+                    DsParam.DIALOGUE_ENHANCER_ENABLE,
+                    prefs.getBoolean(DolbyConstants.PREF_DIALOGUE, false),
+                    profile
+                )
+            }
+
+            if (prefs.contains(DolbyConstants.PREF_DIALOGUE_AMOUNT)) {
+                dolbyEffect.setDapParameter(
+                    DsParam.DIALOGUE_ENHANCER_AMOUNT,
+                    prefs.getInt(DolbyConstants.PREF_DIALOGUE_AMOUNT, 6),
+                    profile
+                )
+            }
+
+            if (prefs.contains(DolbyConstants.PREF_BASS)) {
+                dolbyEffect.setDapParameter(
+                    DsParam.BASS_ENHANCER_ENABLE,
+                    prefs.getBoolean(DolbyConstants.PREF_BASS, false),
+                    profile
+                )
+            }
+
+            if (volumeLevelerSupported && prefs.contains(DolbyConstants.PREF_VOLUME)) {
+                dolbyEffect.setDapParameter(
+                    DsParam.VOLUME_LEVELER_ENABLE,
+                    prefs.getBoolean(DolbyConstants.PREF_VOLUME, false),
+                    profile
+                )
+            }
+
+            DolbyConstants.dlog(TAG, "Restored explicit user overrides for profile $profile")
         } catch (e: Exception) {
             DolbyConstants.dlog(TAG, "Failed to restore profile settings: ${e.message}")
         }
     }
-
     fun applySavedState() {
         try {
             checkEffect()
