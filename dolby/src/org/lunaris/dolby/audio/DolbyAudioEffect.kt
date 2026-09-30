@@ -51,14 +51,31 @@ class DolbyAudioEffect(priority: Int, audioSession: Int) : AudioEffect(
     }
 
     fun setDapParameter(param: DsParam, values: IntArray, profile: Int = this.profile) {
+        var appliedValues = values
+
+        // The Xiaomi DAP wrapper exposes the 20-band GEQ but no independently
+        // verified preamp parameter. Keep user/preset EQ full-scale safe before
+        // it enters DAP: positive peak gain is converted to an equivalent global
+        // attenuation while preserving the exact frequency-response shape.
+        if (param == DsParam.GEQ_BAND_GAINS) {
+            val headroom = DapEqualizerMath.withDigitalHeadroom(values)
+            appliedValues = headroom.gainsQ4
+            if (headroom.attenuationQ4 > 0) {
+                DolbyConstants.dlog(
+                    TAG,
+                    "GEQ headroom: profile=$profile attenuation=-${headroom.attenuationDb} dB"
+                )
+            }
+        }
+
         DolbyConstants.dlog(TAG, "setDapParameter: profile=$profile param=$param")
-        val length = values.size
+        val length = appliedValues.size
         val buf = ByteArray((length + 4) * 4)
         int32ToByteArray(EFFECT_PARAM_SET_PROFILE_PARAMETER, buf, 0)
         int32ToByteArray(length + 1, buf, 4)
         int32ToByteArray(profile, buf, 8)
         int32ToByteArray(param.id, buf, 12)
-        int32ArrayToByteArray(values, buf, 16)
+        int32ArrayToByteArray(appliedValues, buf, 16)
         checkStatus(setParameter(EFFECT_PARAM_CPDP_VALUES, buf))
     }
 
