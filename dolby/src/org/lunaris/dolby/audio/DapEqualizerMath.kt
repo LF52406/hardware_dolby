@@ -20,6 +20,14 @@ object DapEqualizerMath {
     const val MAX_BOOST_DB = 10f
     const val MAX_BOOST_Q4 = Q4_PER_DB * 10
 
+    data class HeadroomResult(
+        val gainsQ4: IntArray,
+        val attenuationQ4: Int,
+    ) {
+        val attenuationDb: Float
+            get() = attenuationQ4.toFloat() / Q4_PER_DB
+    }
+
     fun q4ToDb(value: Int): Float = value.toFloat() / Q4_PER_DB
 
     fun dbToQ4(valueDb: Double): Int {
@@ -30,6 +38,33 @@ object DapEqualizerMath {
     }
 
     fun clampBoost(valueQ4: Int): Int = valueQ4.coerceAtMost(MAX_BOOST_Q4)
+
+    /**
+     * Converts a relative EQ curve into a full-scale-safe DAP curve.
+     *
+     * DAP's profile GEQ does not expose a separate confirmed preamp control in
+     * the Xiaomi wrapper. Leaving positive GEQ gain in a full-scale music path
+     * makes the downstream limiter/regulator absorb that gain, which is most
+     * audible at high playback volume. Subtracting the positive peak from every
+     * band is mathematically equivalent to applying a preamp of -peak dB: the
+     * requested frequency-response shape is preserved while the highest band is
+     * kept at 0 dB.
+     *
+     * Curves that are already at or below 0 dB are returned unchanged. No extra
+     * safety attenuation is injected here; mondrian's stock DAX tuning remains
+     * responsible for endpoint/speaker protection.
+     */
+    fun withDigitalHeadroom(gainsQ4: IntArray): HeadroomResult {
+        if (gainsQ4.isEmpty()) return HeadroomResult(IntArray(0), 0)
+
+        val peakQ4 = gainsQ4.maxOrNull()?.coerceAtLeast(0) ?: 0
+        if (peakQ4 == 0) return HeadroomResult(gainsQ4.copyOf(), 0)
+
+        return HeadroomResult(
+            gainsQ4 = IntArray(gainsQ4.size) { index -> gainsQ4[index] - peakQ4 },
+            attenuationQ4 = peakQ4,
+        )
+    }
 
     fun sampleLogFrequency(
         targetHz: Double,
