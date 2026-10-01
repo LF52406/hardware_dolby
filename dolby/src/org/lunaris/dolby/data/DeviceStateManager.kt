@@ -126,35 +126,63 @@ class DeviceStateManager(private val context: Context) {
 
         val storedVersion = prefs.getInt(KEY_VERSION, -1)
         if (storedVersion != SNAPSHOT_VERSION) {
-            DolbyConstants.dlog(TAG,
-                "Snapshot version mismatch for $deviceKey: stored=$storedVersion current=$SNAPSHOT_VERSION — discarding")
+            DolbyConstants.dlog(
+                TAG,
+                "Snapshot version mismatch for $deviceKey: stored=$storedVersion current=$SNAPSHOT_VERSION — discarding"
+            )
             clearSnapshot(deviceKey)
             return false
         }
 
-        return try {
-            val profile = prefs.getInt(KEY_PROFILE, 0)
+        val profile = prefs.getInt(KEY_PROFILE, 0)
+        if (profile !in 0..6) {
+            DolbyConstants.dlog(TAG, "Invalid snapshot profile for $deviceKey: $profile — discarding")
+            clearSnapshot(deviceKey)
+            return false
+        }
 
-            // Dolby power is global, not per-output-device. Restoring a device
-            // snapshot must not toggle the session-0 effect or fight its owner.
+        // Parse and validate the stored EQ before mutating the active profile. A
+        // malformed snapshot must never clear a valid current route state first.
+        val storedBandCount = prefs.getInt(KEY_EQ_BAND_COUNT, -1)
+        val gainsStr = prefs.getString(KEY_EQ_GAINS, null)
+        val bandGains = when {
+            gainsStr == null && storedBandCount <= 0 -> null
+            gainsStr == null || storedBandCount != DolbyRepository.BAND_FREQUENCIES_20.size -> {
+                DolbyConstants.dlog(
+                    TAG,
+                    "Invalid EQ snapshot for $deviceKey: storedBandCount=$storedBandCount — discarding"
+                )
+                clearSnapshot(deviceKey)
+                return false
+            }
+            else -> {
+                val gains = gainsStr.split(",").mapNotNull { it.trim().toIntOrNull() }
+                if (gains.size != storedBandCount) {
+                    DolbyConstants.dlog(
+                        TAG,
+                        "EQ band count mismatch for $deviceKey: stored=$storedBandCount actual=${gains.size} — discarding"
+                    )
+                    clearSnapshot(deviceKey)
+                    return false
+                }
+                gains.mapIndexed { index, gain ->
+                    BandGain(
+                        frequency = DolbyRepository.BAND_FREQUENCIES_20[index],
+                        gain = gain,
+                    )
+                }
+            }
+        }
+
+        return try {
+            // A snapshot is a complete description of app-owned overrides for
+            // this output. Reset the target profile to factory DAX first so keys
+            // absent from the snapshot cannot leak in from the previous device.
+            repository.resetProfile(profile)
             repository.setCurrentProfile(profile)
 
-            val storedBandCount = prefs.getInt(KEY_EQ_BAND_COUNT, -1)
-            val gainsStr = prefs.getString(KEY_EQ_GAINS, null)
-            if (gainsStr != null && storedBandCount > 0) {
-                val gains = gainsStr.split(",").mapNotNull { it.toIntOrNull() }
-                if (gains.size == storedBandCount) {
-                    val bandGains = gains.mapIndexed { i, g ->
-                        BandGain(
-                            frequency = DolbyRepository.BAND_FREQUENCIES_20.getOrElse(i) { i },
-                            gain = g
-                        )
-                    }
-                    repository.setEqualizerGains(profile, bandGains, BandMode.TWENTY_BAND)
-                } else {
-                    DolbyConstants.dlog(TAG,
-                        "EQ band count mismatch for $deviceKey: stored=$storedBandCount actual=${gains.size} — skipping EQ restore")
-                }
+            if (bandGains != null) {
+                repository.setEqualizerGains(profile, bandGains, BandMode.TWENTY_BAND)
             }
 
             if (prefs.contains(KEY_IEQ)) {
@@ -162,21 +190,36 @@ class DeviceStateManager(private val context: Context) {
             }
 
             if (prefs.contains(KEY_HP_VIRT)) {
-                repository.setHeadphoneVirtualizerEnabled(profile, prefs.getBoolean(KEY_HP_VIRT, false))
+                repository.setHeadphoneVirtualizerEnabled(
+                    profile,
+                    prefs.getBoolean(KEY_HP_VIRT, false),
+                )
             }
             if (prefs.contains(KEY_SPK_VIRT)) {
-                repository.setSpeakerVirtualizerEnabled(profile, prefs.getBoolean(KEY_SPK_VIRT, false))
+                repository.setSpeakerVirtualizerEnabled(
+                    profile,
+                    prefs.getBoolean(KEY_SPK_VIRT, false),
+                )
             }
 
             if (prefs.contains(KEY_DIALOGUE)) {
-                repository.setDialogueEnhancerEnabled(profile, prefs.getBoolean(KEY_DIALOGUE, false))
+                repository.setDialogueEnhancerEnabled(
+                    profile,
+                    prefs.getBoolean(KEY_DIALOGUE, false),
+                )
             }
             if (prefs.contains(KEY_DIALOGUE_AMT)) {
-                repository.setDialogueEnhancerAmount(profile, prefs.getInt(KEY_DIALOGUE_AMT, 6))
+                repository.setDialogueEnhancerAmount(
+                    profile,
+                    prefs.getInt(KEY_DIALOGUE_AMT, 6),
+                )
             }
 
             if (prefs.contains(KEY_BASS_ENABLED)) {
-                repository.setBassEnhancerEnabled(profile, prefs.getBoolean(KEY_BASS_ENABLED, false))
+                repository.setBassEnhancerEnabled(
+                    profile,
+                    prefs.getBoolean(KEY_BASS_ENABLED, false),
+                )
             }
             if (prefs.contains(KEY_BASS_CURVE)) {
                 repository.setBassCurve(profile, prefs.getInt(KEY_BASS_CURVE, 0))
@@ -192,19 +235,30 @@ class DeviceStateManager(private val context: Context) {
             }
 
             if (repository.volumeLevelerSupported && prefs.contains(KEY_VOLUME)) {
-                repository.setVolumeLevelerEnabled(profile, prefs.getBoolean(KEY_VOLUME, false))
+                repository.setVolumeLevelerEnabled(
+                    profile,
+                    prefs.getBoolean(KEY_VOLUME, false),
+                )
             }
             if (repository.stereoWideningSupported && prefs.contains(KEY_STEREO)) {
-                repository.setStereoWideningAmount(profile, prefs.getInt(KEY_STEREO, 32))
+                repository.setStereoWideningAmount(
+                    profile,
+                    prefs.getInt(KEY_STEREO, 32),
+                )
             }
 
-            DolbyConstants.dlog(TAG,
-                "Snapshot restored for device=$deviceKey profile=$profile v=$storedVersion")
+            DolbyConstants.dlog(
+                TAG,
+                "Snapshot restored for device=$deviceKey profile=$profile v=$storedVersion"
+            )
             true
         } catch (e: Exception) {
-            DolbyConstants.dlog(TAG,
-                "Failed to restore snapshot for $deviceKey: ${e.message} — discarding")
-            clearSnapshot(deviceKey)
+            // The snapshot itself was already validated. Keep it on transient
+            // AudioEffect/routing failures so a later reconnect can retry it.
+            DolbyConstants.dlog(
+                TAG,
+                "Failed to restore snapshot for $deviceKey: ${e.message} — keeping snapshot for retry"
+            )
             false
         }
     }
@@ -244,7 +298,7 @@ class DeviceStateManager(private val context: Context) {
         private const val KEY_HP_VIRT = "hp_virt"
         private const val KEY_SPK_VIRT = "spk_virt"
         private const val KEY_DIALOGUE = "dialogue"
-        private const val KEY_DIALOGUE_AMT  = "dialogue_amt"
+        private const val KEY_DIALOGUE_AMT = "dialogue_amt"
         private const val KEY_BASS_ENABLED = "bass_enabled"
         private const val KEY_BASS_LEVEL = "bass_level"
         private const val KEY_BASS_CURVE = "bass_curve"
