@@ -51,20 +51,22 @@ class DolbyAudioEffect(priority: Int, audioSession: Int) : AudioEffect(
     }
 
     fun setDapParameter(param: DsParam, values: IntArray, profile: Int = this.profile) {
-        // Bass enhancer process state belongs to the factory DAX endpoint/profile
-        // tuning on mondrian. Lunaris' Bass level is already implemented as a GEQ
-        // contour; changing parameter 111 as well stacks two bass stages and pushes
-        // the speaker regulator/limiter unnecessarily at high volume. Preserve the
-        // factory process state and let the user-facing tone control affect GEQ only.
-        if (param == DsParam.BASS_ENHANCER_ENABLE) {
-            DolbyConstants.dlog(
-                TAG,
-                "Preserving factory DAX bass-enhancer state for profile=$profile"
-            )
-            return
-        }
-
         var appliedValues = values
+
+        // Every mondrian factory endpoint/profile keeps DAP bass enhancer 111
+        // disabled. Older app builds could enable it in addition to the app's GEQ
+        // bass contour, leaving a second bass stage active across upgrades. Force
+        // that legacy process off whenever this path is touched; user-facing bass
+        // remains implemented by the composed GEQ and stock virtual-bass tuning.
+        if (param == DsParam.BASS_ENHANCER_ENABLE) {
+            if (values.firstOrNull() != 0) {
+                DolbyConstants.dlog(
+                    TAG,
+                    "Suppressing legacy DAP bass enhancer for profile=$profile"
+                )
+            }
+            appliedValues = intArrayOf(0)
+        }
 
         // The Xiaomi DAP wrapper exposes the 20-band GEQ but no independently
         // verified preamp parameter. Keep user/preset EQ full-scale safe before
